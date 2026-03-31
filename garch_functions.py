@@ -8,10 +8,6 @@ import statsmodels.api as sm
 from statsmodels.stats.diagnostic import het_arch, acorr_ljungbox
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
-
 from dataclasses import dataclass, field
 from typing import List  # used in GARCHConfig field annotations
 # Note: uses print() for output throughout
