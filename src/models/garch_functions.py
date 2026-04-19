@@ -167,7 +167,7 @@ def _fit_model(returns_series: pd.Series,
            Prevents volatility absorbing mean dynamics.
     """
     mean_lags = [1] if mean == "AR" else None
-
+    np.random.seed(42)
     if vol == "EGARCH":
         am = arch_model(returns_series, mean=mean, lags=mean_lags,
                         vol="EGARCH", p=1, o=1, q=1, dist=dist)
