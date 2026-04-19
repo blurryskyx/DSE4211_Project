@@ -8,36 +8,26 @@ import statsmodels.api as sm
 from statsmodels.stats.diagnostic import het_arch, acorr_ljungbox
 
 
+# CONFIGURATION
+
 from dataclasses import dataclass, field
-from typing import List  # used in GARCHConfig field annotations
-# Note: uses print() for output throughout
 
 
 @dataclass
 class GARCHConfig:
-    """
-    Central configuration for the GARCH pipeline.
-    Override defaults by passing GARCHConfig(arch_lags=8) etc.
-    """
     arch_lags:              int   = 12           # Using weekly data, lags are taken to be 3 months/ one quarter
     lb_lags:                list  = field(default_factory=lambda: [10, 20]) # test at lag 10 (short term) and 20 (medium term)
     test_size:              int   = 52           # 1 year
     significance_level:     float = 0.05
     skewness_threshold:     float = 0.5
     kurtosis_threshold:     float = 1.0
-#     convergence_tolerance:  float = 1e-10
-#     boundary_threshold:     float = 1e-6
-    bic_tolerance:          float = 2.0   # Kass & Raftery (1995): ΔBIC < 2 is not worth mentioning
-                                          # GED accepted if BIC(GED) <= BIC(skewt) + bic_tolerance
-                                          # AND kurtosis improves.
-    refit_frequency:        int   = 1     # OOS refit: 1=every step (Hansen & Lunde 2005 standard)
+    bic_tolerance:          float = 2.0
 
 # Default config instance — functions use this unless overridden
 DEFAULT_CONFIG = GARCHConfig()
 
 
 # ARCH LM TEST
-
 def arch_lm_test(resid: pd.Series, lags: int = 12,
                  label: str = "") -> dict:
     """
@@ -66,15 +56,8 @@ def normality_tail_check(std_resid: pd.Series,
                           label: str = "",
                           config: GARCHConfig = None) -> dict:
     """
-    Normality and tail diagnostics on standardised residuals z_t = e_t / sigma_t.
+    JB and KS only valid if the distributional assumption is normal
 
-    Distribution-aware interpretation:
-      normal : JB and KS vs normal are fully valid
-      skewt  : JB informational only (non-normal by design)
-               KS run against fitted t(df=nu) — correct benchmark
-               Excess kurtosis is the primary diagnostic
-      ged    : JB informational only; excess kurtosis is primary diagnostic
-               KS vs normal shown as reference only
     """
     from scipy.stats import t as student_t
 
@@ -168,7 +151,7 @@ def normality_tail_check(std_resid: pd.Series,
     }
 
 
-# 4. INTERNAL HELPERS
+# MODEL FIT FUNCTION
 def _fit_model(returns_series: pd.Series,
                vol: str, dist: str,
                mean: str = "Constant") -> object:
@@ -195,10 +178,11 @@ def _fit_model(returns_series: pd.Series,
         am = arch_model(returns_series, mean=mean, lags=mean_lags,
                         vol="GARCH",  p=1, o=0, q=1, dist=dist)
 
+    # if does not converge on first try, loosen convergence criteria and try again
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         result = am.fit(disp="off", show_warning=False)
-
+    
     if result.convergence_flag != 0:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -235,9 +219,9 @@ def _stationarity_label(result, vol: str) -> tuple:
 
 def _persistence_interpretation(val: float) -> str:
     """
-    Human-readable persistence label with half-life in weeks.
+    Persistence label with half-life in weeks.
 
-    Thresholds (GARCH literature):
+    Thresholds:
       >= 0.98 : near-IGARCH — shocks almost permanent
       >= 0.90 : highly persistent — typical for equity/crypto
       >= 0.70 : moderately persistent
@@ -264,13 +248,11 @@ def _persistence_interpretation(val: float) -> str:
 def _check_boundary(result) -> bool:
     """
     Detect degenerate boundary solutions.
-
-    Fix C: now checks alpha, beta, AND gamma — not just beta.
     Rules:
       beta  ~= 0 alone        -> always degenerate (no persistence)
       alpha ~= 0 AND gamma ~= 0 -> asymmetric model with no shock response
       alpha ~= 0 alone        -> not flagged (could be valid low-ARCH regime)
-      gamma ~= 0 alone        -> not flagged (just means no asymmetry)
+      gamma ~= 0 alone        -> not flagged (no asymmetry)
     """
     params = result.params
     flags  = []
@@ -298,10 +280,9 @@ def _run_postfit_diagnostics(std_resid: pd.Series,
                               asset_name: str,
                               config: GARCHConfig = None) -> tuple:
     """
-    Consolidated post-fit diagnostics.
     Runs Ljung-Box on resid and resid², ARCH LM, normality check.
     Returns (arch_post_dict, norm_dict).
-    Called for both the skewt winner and the GED refit.
+    Called for the skewt winner and the GED refit.
     """
     if config is None:
         config = DEFAULT_CONFIG
@@ -332,7 +313,7 @@ def compete_models(returns_series: pd.Series,
     """
     Fit GARCH(1,1), GJR-GARCH(1,1,1), EGARCH(1,1,1) with skewt.
     If any model fails or hits a boundary with skewt, retry with GED
-    before excluding it — ensuring all three structures get a fair chance.
+    before excluding it so that all three structures get a fair chance.
 
     Selection order per model:
       1. Try skewt
@@ -341,7 +322,6 @@ def compete_models(returns_series: pd.Series,
 
     Final competition uses BIC across all valid fits (may mix skewt + GED).
 
-    Fix D: mean equation auto-detected via Ljung-Box on raw returns at lag 1.
     p < 0.10 -> AR(1) mean to prevent volatility absorbing mean dynamics.
     """
     # Auto-detect mean structure
@@ -455,8 +435,7 @@ def fit_garch(returns_series: pd.Series,
     """
     print(f"\n  {'--'*25}")
 
-    # Step 1: model competition (skewt only)
-    # Pre-fit ARCH LM removed (Fix B) -- overlaps with post-fit LB on resid^2
+    # model competition (skewt only)
     if model_type != "auto":
         print(f"\n  Manual override: fitting {model_type} only")
         lb_mean      = acorr_ljungbox(returns_series.dropna(), lags=[1], return_df=True)
@@ -474,13 +453,13 @@ def fit_garch(returns_series: pd.Series,
         mean_spec       = comp["mean_spec"]    # carry forward for GED refit
         comp_candidates = comp["candidates"]
 
-    # Step 3: stationarity check with interpretation (Fix E)
+    # stationarity check with interpretation
     persist_val, persist_label, is_stationary = _stationarity_label(result, chosen)
     interp = _persistence_interpretation(persist_val)
     status = "stationary" if is_stationary else "NON-STATIONARY"
     print(f"  {chosen} {persist_label}={persist_val:.4f}  ->  {status}  |  {interp}")
 
-    # Step 4: post-fit diagnostics on skewt winner
+    # post-fit diagnostics on skewt winner
     cond_var  = result.conditional_volatility ** 2
     std_resid = result.std_resid.dropna()
 
@@ -493,8 +472,7 @@ def fit_garch(returns_series: pd.Series,
         config=DEFAULT_CONFIG
     )
 
-    # Step 5: GED refit of winning structure only (Fix A)
-    # Do NOT re-run full competition -- structure is fixed, test distribution only
+    # GED refit of winning structure only
     final_dist      = current_dist
     final_result    = result
     final_norm      = norm_results
@@ -519,9 +497,7 @@ def fit_garch(returns_series: pd.Series,
                 config=DEFAULT_CONFIG
             )
 
-            # BIC-based acceptance with Kass & Raftery (1995) tolerance
-            # ΔBIC < 2 is "not worth mentioning" — allow GED if kurtosis
-            # improves meaningfully even with a small BIC cost
+            # ΔBIC < 2 is "not worth mentioning", allow GED if kurtosis improves meaningfully even with a small BIC cost
             bic_delta     = result_ged.bic - result.bic
             bic_improves  = bic_delta <= DEFAULT_CONFIG.bic_tolerance
             kurt_improves = norm_ged["excess_kurtosis"] < norm_results["excess_kurtosis"]
@@ -576,16 +552,11 @@ def fit_garch(returns_series: pd.Series,
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 7. FIT ALL ASSETS
-# ══════════════════════════════════════════════════════════════════════════════
+# FIT ALL ASSETS
 
 def fit_all_garch(returns: pd.DataFrame,
                   model_type: str = "auto") -> dict:
-    """
-    Fit full pipeline for every column in returns DataFrame.
-    Call diagnostics_summary_table() explicitly in main file.
-    """
+
     garch_results = {}
     for asset in returns.columns:
         print(f"\n{'='*60}")
@@ -602,9 +573,8 @@ def fit_all_garch(returns: pd.DataFrame,
     return garch_results
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 8. SUMMARY TABLE
-# ══════════════════════════════════════════════════════════════════════════════
+
+# SUMMARY TABLE
 
 def diagnostics_summary_table(garch_results: dict) -> pd.DataFrame:
     """
@@ -659,100 +629,8 @@ def diagnostics_summary_table(garch_results: dict) -> pd.DataFrame:
 
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 10. PARAMETER SIGNIFICANCE TABLE
-# ══════════════════════════════════════════════════════════════════════════════
-
-def parameter_significance_table(garch_results: dict) -> pd.DataFrame:
-    """
-    Key GARCH parameters with t-stats, p-values, significance stars.
-    Suitable for direct use as a results table in your paper.
-    *** p<0.01  ** p<0.05  * p<0.10
-    """
-    rows       = []
-    param_keys = ["mu", "omega", "alpha[1]", "gamma[1]", "beta[1]", "nu"]
-    display    = ["mu", "omega", "alpha",    "gamma",     "beta",    "nu"]
-
-    for asset, res in garch_results.items():
-        if not res.get("success", False):
-            continue
-        result = res["result"]
-        params = result.params
-        pvals  = result.pvalues
-        tstats = result.tvalues
-        model  = res["model_type"]
-        dist   = res.get("dist", "skewt")
-
-        row = {"Asset": asset, "Model": f"{model}-{dist.upper()}"}
-        for key, label in zip(param_keys, display):
-            val  = params.get(key, None)
-            pval = pvals.get(key,  None)
-            tval = tstats.get(key, None)
-            if val is not None:
-                sig = ("***" if pval < 0.01 else
-                       "**"  if pval < 0.05 else
-                       "*"   if pval < 0.10 else "")
-                row[label]            = round(float(val),  4)
-                row[f"{label}_tstat"] = round(float(tval), 3)
-                row[f"{label}_pval"]  = round(float(pval), 4)
-                row[f"{label}_sig"]   = sig
-            else:
-                row[label]            = "--"
-                row[f"{label}_tstat"] = "--"
-                row[f"{label}_pval"]  = "--"
-                row[f"{label}_sig"]   = "--"
-        rows.append(row)
-
-    df = pd.DataFrame(rows).set_index("Asset")
-    print("\n-- GARCH Parameter Estimates (*** p<0.01, ** p<0.05, * p<0.10) --")
-    disp_cols = (["Model"] +
-                 [l for l in display] +
-                 [f"{l}_sig" for l in display])
-    disp_cols = [c for c in disp_cols if c in df.columns]
-    print(df[disp_cols].to_string())
-    df.to_csv("garch_parameters.csv")
-    print("Saved: garch_parameters.csv")
-    return df
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 11. PLOTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-def plot_conditional_volatility(garch_results: dict,
-                                 psy_results: dict,
-                                 save_path: str = "03_conditional_volatility.png"):
-    """Conditional volatility for all assets with bubble episode shading."""
-    assets = list(garch_results.keys())
-    fig, axes = plt.subplots(len(assets), 1,
-                             figsize=(16, 3 * len(assets)), sharex=True)
-    if len(assets) == 1:
-        axes = [axes]
-
-    for ax, asset in zip(axes, assets):
-        cv   = garch_results[asset]["cond_vol"]
-        dist = garch_results[asset].get("dist", "skewt")
-        mod  = garch_results[asset]["model_type"]
-
-        ax.fill_between(cv.index, cv.values, alpha=0.6,
-                        color="steelblue", label=f"{asset} sigma_t")
-        ax.set_ylabel("Cond. vol (%)")
-        ax.set_title(f"{asset} -- {mod}(1,1)-{dist.upper()}")
-
-        if psy_results and asset in psy_results and "episodes" in psy_results[asset]:
-            for k, (s, e) in enumerate(psy_results[asset]["episodes"]):
-                ax.axvspan(s, e, alpha=0.18, color="crimson",
-                           label="bubble" if k == 0 else "")
-        ax.legend(fontsize=8, loc="upper right")
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"Saved: {save_path}")
-
-
 def plot_garch_diagnostics(garch_results: dict,
-                            save_path: str = "04_garch_diagnostics.png"):
+                            save_path: str = "../output/figures/garch_diagnostics.png"):
     """
     Four-panel diagnostic plot per asset:
       1. Standardised residuals over time
@@ -837,89 +715,3 @@ def plot_garch_diagnostics(garch_results: dict,
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved: {save_path}")
-
-
-def plot_news_impact_curve(garch_results: dict,
-                            save_path: str = "05_news_impact_curve.png"):
-    """
-    News Impact Curve (Engle & Ng 1993).
-    Shows asymmetric volatility response to positive vs negative shocks.
-    Steep left side confirms leverage effect detected by sign-bias test.
-    """
-    assets   = list(garch_results.keys())
-    n_assets = len(assets)
-    z_range  = np.linspace(-4, 4, 300)
-
-    fig, axes = plt.subplots(1, n_assets,
-                              figsize=(5 * n_assets, 4), sharey=False)
-    if n_assets == 1:
-        axes = [axes]
-
-    for ax, asset in zip(axes, assets):
-        res        = garch_results[asset]
-        model      = res["model_type"]
-        dist       = res.get("dist", "skewt")
-        params     = res["result"].params
-        sigma2_bar = float(res["cond_var"].mean())
-
-        try:
-            omega = float(params.get("omega",    0))
-            alpha = float(params.get("alpha[1]", 0))
-            beta  = float(params.get("beta[1]",  0))
-            gamma = float(params.get("gamma[1]", 0))
-
-            if model == "EGARCH":
-                e_abs_z = np.sqrt(2 / np.pi)
-                log_nic = (omega
-                           + alpha * (np.abs(z_range) - e_abs_z)
-                           + gamma * z_range
-                           + beta  * np.log(max(sigma2_bar, 1e-10)))
-                nic = np.exp(log_nic)
-            elif model == "GJR":
-                ind_neg = (z_range < 0).astype(float)
-                nic = (alpha + gamma * ind_neg) * z_range**2 + beta * sigma2_bar
-            else:
-                nic = alpha * z_range**2 + beta * sigma2_bar
-
-            mid     = len(nic) // 2
-            nic_norm = nic / max(nic[mid], 1e-10)
-
-            ax.plot(z_range[z_range < 0],  nic_norm[z_range < 0],
-                    color="crimson",   lw=1.5, label="Negative shock")
-            ax.plot(z_range[z_range >= 0], nic_norm[z_range >= 0],
-                    color="steelblue", lw=1.5, label="Positive shock")
-            ax.axvline(0, lw=0.6, color="black", linestyle="--")
-
-        except Exception as e:
-            ax.text(0.5, 0.5, f"NIC failed:\n{e}",
-                    transform=ax.transAxes, ha="center", fontsize=8)
-
-        ax.set_title(f"{asset}\n{model}-{dist.upper()}", fontsize=9)
-        ax.set_xlabel("Shock size (z)")
-        ax.set_ylabel("Normalised variance response")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3, lw=0.5)
-
-    plt.suptitle("News Impact Curves -- asymmetric volatility response",
-                 fontsize=11, y=1.01)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    plt.close()
-    print(f"Saved: {save_path}")
-
-
-def plot_all_diagnostics(garch_results: dict, psy_results: dict):
-    """
-    Convenience wrapper -- runs all diagnostic plots.
-    Call once in main file after fit_all_garch().
-
-    Outputs:
-      03_conditional_volatility.png
-      04_garch_diagnostics.png
-      05_news_impact_curve.png
-    """
-    print("\nGenerating diagnostic plots ...")
-    plot_conditional_volatility(garch_results, psy_results)
-    plot_garch_diagnostics(garch_results)
-    plot_news_impact_curve(garch_results)
-    print("All plots saved.")

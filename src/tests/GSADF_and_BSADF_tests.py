@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ── 0. Load & resample to weekly ──────────────────────────────────────────────
-df = pd.read_csv("data/merged_data.csv")
+df = pd.read_csv("../data/merged_data.csv")
 df["date"] = pd.to_datetime(df["date"], dayfirst=True)
 df = df.sort_values("date").set_index("date")
 
@@ -204,5 +204,5 @@ print("\n*** p<0.01  ** p<0.05  * p<0.10  n.s. not significant")
 
 import pickle
 
-with open("gsadf_results.pkl", "wb") as f:
+with open("../output/models/gsadf_results.pkl", "wb") as f:
     pickle.dump(results, f)
